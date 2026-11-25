@@ -1,4 +1,5 @@
  package com.example.recordatoriosapp
+ import java.util.UUID
 
     sealed class EstadoRecordatorio(val descripcion: String) {
         object Pendiente : EstadoRecordatorio("Pendiente")
@@ -11,7 +12,7 @@
     }
 
     data class Recordatorio(
-        val id: Int,
+        val id: String = UUID.randomUUID().toString(),
         val titulo: String,
         val descripcion: String? = null,
         val categoria: String,

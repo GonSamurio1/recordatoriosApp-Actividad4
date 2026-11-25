@@ -1,5 +1,7 @@
 package com.example.recordatoriosapp
 
+import com.google.firebase.firestore.DocumentSnapshot
+
 // 1. De Entity (Room) -> Modelo de Dominio (UI)
 fun RecordatorioEntity.toDomain(): Recordatorio {
     val estadoDominio = when (this.estado) {
@@ -10,13 +12,13 @@ fun RecordatorioEntity.toDomain(): Recordatorio {
 
     val prioridadDominio = try {
         Prioridad.valueOf(this.prioridad)
-    } catch (e: IllegalArgumentException) {
+    } catch (_: IllegalArgumentException) {
         Prioridad.MEDIA
     }
 
     val syncDominio = try {
         EstadoSync.valueOf(this.estadoSync)
-    } catch (e: IllegalArgumentException) {
+    } catch (_: IllegalArgumentException) {
         EstadoSync.SINCRONIZADO
     }
 
@@ -34,7 +36,7 @@ fun RecordatorioEntity.toDomain(): Recordatorio {
 
 // 2. De Modelo de Dominio (UI) -> Entity (Room)
 fun Recordatorio.toEntity(
-    remoteId: Int? = null,
+    userId: String,
     estadoSync: EstadoSync = this.estadoSync
 ): RecordatorioEntity {
     val estadoTexto = when (this.estado) {
@@ -45,7 +47,7 @@ fun Recordatorio.toEntity(
 
     return RecordatorioEntity(
         id = this.id,
-        remoteId = remoteId,
+        userId = userId,
         titulo = this.titulo,
         descripcion = this.descripcion,
         categoria = this.categoria,
@@ -56,27 +58,32 @@ fun Recordatorio.toEntity(
     )
 }
 
-// 3. De DTO (Retrofit) -> Entity (Room)
-fun RecordatorioDto.toEntity(localId: Int = 0): RecordatorioEntity {
-    return RecordatorioEntity(
-        id = localId,
-        remoteId = this.id,
-        titulo = this.title.replaceFirstChar { it.uppercase() },
-        descripcion = "Sincronizado desde servicio remoto (ID #${this.id ?: "-"})",
-        categoria = "Remoto",
-        prioridad = Prioridad.MEDIA.name,
-        estado = if (this.completed) "Completado" else "Pendiente",
-        fechaCreacion = System.currentTimeMillis(),
-        estadoSync = EstadoSync.SINCRONIZADO.name
+// 3. De Entity (Room) -> Mapa para Cloud Firestore
+fun RecordatorioEntity.toFirestoreMap(): Map<String, Any?> {
+    return mapOf(
+        "id" to this.id,
+        "userId" to this.userId,
+        "titulo" to this.titulo,
+        "descripcion" to this.descripcion,
+        "categoria" to this.categoria,
+        "prioridad" to this.prioridad,
+        "estado" to this.estado,
+        "fechaCreacion" to this.fechaCreacion
     )
 }
 
-// 4. De Entity (Room) -> DTO (Retrofit)
-fun RecordatorioEntity.toDto(): RecordatorioDto {
-    return RecordatorioDto(
-        id = this.remoteId,
-        userId = 1,
-        title = this.titulo,
-        completed = this.estado == "Completado"
+// 4. De DocumentSnapshot (Cloud Firestore) -> Entity (Room)
+fun DocumentSnapshot.toRecordatorioEntity(userId: String): RecordatorioEntity? {
+    val titulo = getString("titulo") ?: return null
+    return RecordatorioEntity(
+        id = id,
+        userId = userId,
+        titulo = titulo,
+        descripcion = getString("descripcion"),
+        categoria = getString("categoria") ?: "General",
+        prioridad = getString("prioridad") ?: Prioridad.MEDIA.name,
+        estado = getString("estado") ?: "Pendiente",
+        fechaCreacion = getLong("fechaCreacion") ?: System.currentTimeMillis(),
+        estadoSync = EstadoSync.SINCRONIZADO.name
     )
 }

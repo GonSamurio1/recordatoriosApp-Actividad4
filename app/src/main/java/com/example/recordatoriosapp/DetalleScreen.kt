@@ -28,7 +28,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetalleScreen(
-    id: Int,
+    id: String,
     viewModel: DetalleViewModel,
     onVolver: () -> Unit
 ) {

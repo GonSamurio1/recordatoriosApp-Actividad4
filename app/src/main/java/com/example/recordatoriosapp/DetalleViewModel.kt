@@ -17,7 +17,7 @@ class DetalleViewModel(
     private val _eliminado = MutableStateFlow(false)
     val eliminado: StateFlow<Boolean> = _eliminado.asStateFlow()
 
-    fun cargarDetalle(id: Int) {
+    fun cargarDetalle(id: String) {
         viewModelScope.launch {
             _uiState.value = DetalleUiState.Cargando
             val recordatorio = repository.obtenerPorId(id)
@@ -39,7 +39,7 @@ class DetalleViewModel(
         }
     }
 
-    fun eliminarRecordatorio(id: Int) {
+    fun eliminarRecordatorio(id: String) {
         viewModelScope.launch {
             repository.eliminarRecordatorio(id)
             _eliminado.value = true

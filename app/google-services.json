@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "786980029153",
+    "project_id": "recordatorios-app-cloud",
+    "storage_bucket": "recordatorios-app-cloud.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:786980029153:android:8643ac1de1732f85952da0",
+        "android_client_info": {
+          "package_name": "com.example.recordatoriosapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBUNfiSoCqI46bTYMG1EfsNKaJOVZ-oovk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

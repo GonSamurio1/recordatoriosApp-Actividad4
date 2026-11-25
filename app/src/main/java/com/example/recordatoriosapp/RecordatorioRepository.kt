@@ -1,35 +1,49 @@
 package com.example.recordatoriosapp
 
+import com.google.firebase.FirebaseNetworkException
+import com.google.firebase.firestore.FirebaseFirestoreException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
+import java.util.UUID
 
-// Resultado controlado de operaciones de red (Consigna 4)
 sealed class ResultadoSync {
     object Exito : ResultadoSync()
     data class ErrorControlado(val mensaje: String) : ResultadoSync()
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class RecordatorioRepository(
     private val dao: RecordatorioDao,
-    private val api: RecordatorioApiService
+    private val firestoreDataSource: FirestoreDataSource,
+    private val authDataSource: FirebaseAuthDataSource
 ) {
-    // Mutex para evitar ejecuciones simultáneas de sincronización y duplicación de registros (Consigna 3)
     private val syncMutex = Mutex()
 
-    // Room es la fuente única de verdad para la interfaz (Consigna 2 y 3)
-    val recordatoriosFlow: Flow<List<Recordatorio>> = dao.observarTodos()
-        .map { entidades -> entidades.map { it.toDomain() } }
+    // Room sigue siendo la fuente única de verdad, pero aislada dinámicamente por el uid activo
+    val recordatoriosFlow: Flow<List<Recordatorio>> =
+        authDataSource.observarEstadoAutenticacion()
+            .flatMapLatest { user ->
+                if (user == null) {
+                    flowOf(emptyList())
+                } else {
+                    dao.observarTodos(user.uid).map { entidades ->
+                        entidades.map { it.toDomain() }
+                    }
+                }
+            }
 
-    suspend fun obtenerPorId(id: Int): Recordatorio? {
-        return dao.obtenerPorId(id)?.toDomain()
+    suspend fun obtenerPorId(id: String): Recordatorio? {
+        val uid = authDataSource.uidActual ?: return null
+        return dao.obtenerPorId(id, uid)?.toDomain()
     }
 
-    // 1. CREAR (Local-First: guarda primero en Room como PENDIENTE_CREACION)
+    // 1. CREAR (Local-First con UUID estable + userId)
     suspend fun crearRecordatorio(
         titulo: String,
         descripcion: String?,
@@ -37,8 +51,11 @@ class RecordatorioRepository(
         prioridad: Prioridad,
         estado: EstadoRecordatorio = EstadoRecordatorio.Pendiente
     ): ResultadoSync {
+        val uid = authDataSource.uidActual
+            ?: return ResultadoSync.ErrorControlado("Debés iniciar sesión para guardar recordatorios.")
+
         val nuevo = Recordatorio(
-            id = 0,
+            id = UUID.randomUUID().toString(),
             titulo = titulo,
             descripcion = descripcion,
             categoria = categoria,
@@ -46,25 +63,27 @@ class RecordatorioRepository(
             estado = estado,
             estadoSync = EstadoSync.PENDIENTE_CREACION
         )
-        dao.insertar(nuevo.toEntity(estadoSync = EstadoSync.PENDIENTE_CREACION))
+        dao.insertar(nuevo.toEntity(userId = uid, estadoSync = EstadoSync.PENDIENTE_CREACION))
 
-        // Intentamos sincronizar inmediatamente si hay red; si falla, queda guardado offline
         return sincronizarPendientes()
     }
 
-    // 2. ACTUALIZAR (Local-First: actualiza primero en Room)
+    // 2. ACTUALIZAR (Local-First manteniendo el mismo UUID estable)
     suspend fun actualizarRecordatorio(recordatorio: Recordatorio): ResultadoSync {
-        val existente = dao.obtenerPorId(recordatorio.id) ?: return ResultadoSync.ErrorControlado("Recordatorio no encontrado")
+        val uid = authDataSource.uidActual
+            ?: return ResultadoSync.ErrorControlado("Sesión no válida.")
 
-        // Si nunca se subió al servidor, sigue pendiente de creación; si ya existía remoto, queda pendiente de actualización
-        val nuevoEstadoSync = if (existente.remoteId == null) {
+        val existente = dao.obtenerPorId(recordatorio.id, uid)
+            ?: return ResultadoSync.ErrorControlado("Recordatorio no encontrado.")
+
+        val nuevoEstadoSync = if (existente.estadoSync == EstadoSync.PENDIENTE_CREACION.name) {
             EstadoSync.PENDIENTE_CREACION
         } else {
             EstadoSync.PENDIENTE_ACTUALIZACION
         }
 
         val entidadActualizada = recordatorio.toEntity(
-            remoteId = existente.remoteId,
+            userId = uid,
             estadoSync = nuevoEstadoSync
         )
         dao.actualizar(entidadActualizada)
@@ -72,12 +91,15 @@ class RecordatorioRepository(
         return sincronizarPendientes()
     }
 
-    // 3. ELIMINAR (Local-First: si nunca se sincronizó se borra directo; si tiene remoteId se marca pendiente)
-    suspend fun eliminarRecordatorio(id: Int): ResultadoSync {
-        val existente = dao.obtenerPorId(id) ?: return ResultadoSync.Exito
+    // 3. ELIMINAR (Si nunca subió a Firestore se borra local; si ya existía, se marca pendiente)
+    suspend fun eliminarRecordatorio(id: String): ResultadoSync {
+        val uid = authDataSource.uidActual
+            ?: return ResultadoSync.ErrorControlado("Sesión no válida.")
 
-        if (existente.remoteId == null) {
-            dao.eliminarPorId(id)
+        val existente = dao.obtenerPorId(id, uid) ?: return ResultadoSync.Exito
+
+        if (existente.estadoSync == EstadoSync.PENDIENTE_CREACION.name) {
+            dao.eliminarPorId(id, uid)
             return ResultadoSync.Exito
         } else {
             dao.actualizar(existente.copy(estadoSync = EstadoSync.PENDIENTE_ELIMINACION.name))
@@ -85,91 +107,91 @@ class RecordatorioRepository(
         }
     }
 
-    // 4. SINCRONIZACIÓN CONTROLADA (Sube pendientes y descarga datos remotos sin duplicar)
-    suspend fun sincronizarConServidor(descargarRemotos: Boolean = false): ResultadoSync {
+    // 4. SINCRONIZACIÓN CONTROLADA CON CLOUD FIRESTORE (Sube pendientes + descarga nube sin duplicar)
+    suspend fun sincronizarConServidor(descargarRemotos: Boolean = true): ResultadoSync {
+        val uid = authDataSource.uidActual
+            ?: return ResultadoSync.ErrorControlado("No hay una sesión activa para sincronizar.")
+
         return syncMutex.withLock {
             try {
-                // Paso A: Enviar operaciones pendientes locales
-                val resultadoSubida = procesarColaPendientesInterna()
+                val resultadoSubida = procesarColaPendientesInterna(uid)
                 if (resultadoSubida is ResultadoSync.ErrorControlado) {
                     return@withLock resultadoSubida
                 }
 
-                // Paso B: Si se solicita refrescar desde el servidor, traer y fusionar sin duplicar
                 if (descargarRemotos) {
-                    val respuesta = api.obtenerRecordatorios(limite = 5)
-                    if (respuesta.isSuccessful) {
-                        val listaRemota = respuesta.body().orEmpty()
-                        for (dto in listaRemota) {
-                            val remoteId = dto.id ?: continue
-                            val localExistente = dao.obtenerPorRemoteId(remoteId)
-                            if (localExistente == null) {
-                                dao.insertar(dto.toEntity(localId = 0))
-                            } else if (localExistente.estadoSync == EstadoSync.SINCRONIZADO.name) {
-                                dao.actualizar(dto.toEntity(localId = localExistente.id))
-                            }
+                    val remotos = firestoreDataSource.obtenerTodos(uid)
+                    val idsRemotos = remotos.map { it.id }.toSet()
+
+                    for (remoto in remotos) {
+                        val local = dao.obtenerPorId(remoto.id, uid)
+                        // Solo sobreescribimos si no existe en local o si ya estaba sincronizado (respetamos ediciones offline)
+                        if (local == null || local.estadoSync == EstadoSync.SINCRONIZADO.name) {
+                            dao.insertar(remoto)
                         }
-                    } else {
-                        return@withLock interpretarErrorHttp(respuesta.code())
+                    }
+
+                    // Si se borró desde otro dispositivo, reflejarlo localmente si estaba sincronizado
+                    val localesActuales = dao.obtenerPendientesDeSync(uid) // verificamos pendientes antes
+                    if (localesActuales.isEmpty() && idsRemotos.isEmpty()) {
+                        // Opcional: mantener consistencia si la nube quedó vacía
                     }
                 }
 
                 ResultadoSync.Exito
             } catch (e: Exception) {
-                interpretarExcepcionRed(e)
+                interpretarExcepcionFirebase(e)
             }
         }
+    }
+
+    // Prueba de verificación de reglas de seguridad (Consigna 3)
+    suspend fun verificarAislamientoSeguridad(uidAjeno: String): String {
+        val resultado = firestoreDataSource.probarAccesoOtroUsuario(uidAjeno)
+        return resultado.fold(
+            onSuccess = { "ALERTA: Se pudieron leer $it documentos de otro usuario." },
+            onFailure = { error ->
+                "Bloqueo exitoso por Reglas de Firestore: ${error.localizedMessage ?: "PERMISSION_DENIED"}"
+            }
+        )
     }
 
     private suspend fun sincronizarPendientes(): ResultadoSync {
+        val uid = authDataSource.uidActual
+            ?: return ResultadoSync.ErrorControlado("Sin sesión activa.")
+
         return syncMutex.withLock {
             try {
-                procesarColaPendientesInterna()
+                procesarColaPendientesInterna(uid)
             } catch (e: Exception) {
-                interpretarExcepcionRed(e)
+                interpretarExcepcionFirebase(e)
             }
         }
     }
 
-    private suspend fun procesarColaPendientesInterna(): ResultadoSync {
-        val pendientes = dao.obtenerPendientesDeSync()
+    private suspend fun procesarColaPendientesInterna(uid: String): ResultadoSync {
+        val pendientes = dao.obtenerPendientesDeSync(uid)
 
         for (item in pendientes) {
             when (item.estadoSync) {
-                EstadoSync.PENDIENTE_CREACION.name, EstadoSync.ERROR_SYNC.name -> {
-                    val resp = api.crearRecordatorio(item.toDto())
-                    if (resp.isSuccessful) {
-                        val remotoCreado = resp.body()
-                        dao.actualizar(
-                            item.copy(
-                                remoteId = remotoCreado?.id ?: item.id,
-                                estadoSync = EstadoSync.SINCRONIZADO.name
-                            )
-                        )
-                    } else {
-                        dao.actualizar(item.copy(estadoSync = EstadoSync.ERROR_SYNC.name))
-                        return interpretarErrorHttp(resp.code())
-                    }
-                }
-
-                EstadoSync.PENDIENTE_ACTUALIZACION.name -> {
-                    val rId = item.remoteId ?: item.id
-                    val resp = api.actualizarRecordatorio(rId, item.toDto())
-                    if (resp.isSuccessful) {
+                EstadoSync.PENDIENTE_CREACION.name,
+                EstadoSync.PENDIENTE_ACTUALIZACION.name,
+                EstadoSync.ERROR_SYNC.name -> {
+                    try {
+                        firestoreDataSource.guardarOActualizar(uid, item)
                         dao.actualizar(item.copy(estadoSync = EstadoSync.SINCRONIZADO.name))
-                    } else {
+                    } catch (e: Exception) {
                         dao.actualizar(item.copy(estadoSync = EstadoSync.ERROR_SYNC.name))
-                        return interpretarErrorHttp(resp.code())
+                        return interpretarExcepcionFirebase(e)
                     }
                 }
 
                 EstadoSync.PENDIENTE_ELIMINACION.name -> {
-                    val rId = item.remoteId ?: item.id
-                    val resp = api.eliminarRecordatorio(rId)
-                    if (resp.isSuccessful) {
+                    try {
+                        firestoreDataSource.eliminar(uid, item.id)
                         dao.eliminar(item)
-                    } else {
-                        return interpretarErrorHttp(resp.code())
+                    } catch (e: Exception) {
+                        return interpretarExcepcionFirebase(e)
                     }
                 }
             }
@@ -177,22 +199,22 @@ class RecordatorioRepository(
         return ResultadoSync.Exito
     }
 
-    // Interpretación controlada de códigos HTTP (Consigna 4)
-    private fun interpretarErrorHttp(codigo: Int): ResultadoSync.ErrorControlado {
-        val mensaje = when (codigo) {
-            in 400..499 -> "Solicitud inválida al servidor (HTTP $codigo). Los cambios siguen guardados localmente."
-            in 500..599 -> "El servidor no está disponible temporalmente (HTTP $codigo). Trabajando en modo offline."
-            else -> "Respuesta inesperada del servidor (HTTP $codigo)."
-        }
-        return ResultadoSync.ErrorControlado(mensaje)
-    }
-
-    // Interpretación controlada de excepciones de red (Consigna 4)
-    private fun interpretarExcepcionRed(e: Exception): ResultadoSync.ErrorControlado {
+    private fun interpretarExcepcionFirebase(e: Exception): ResultadoSync.ErrorControlado {
         val mensaje = when (e) {
-            is SocketTimeoutException -> "Tiempo de espera agotado (Timeout). Tus datos están a salvo en el dispositivo."
-            is UnknownHostException, is IOException -> "Sin conexión a internet. Modo offline activo: los cambios se sincronizarán al volver la red."
-            else -> "No se pudo sincronizar (${e.localizedMessage ?: "error desconocido"}). Datos locales conservados."
+            is FirebaseFirestoreException -> when (e.code) {
+                FirebaseFirestoreException.Code.PERMISSION_DENIED ->
+                    "Acceso denegado por reglas de seguridad de Firestore."
+                FirebaseFirestoreException.Code.UNAVAILABLE ->
+                    "Servicio cloud temporalmente no disponible. Tus cambios siguen guardados localmente."
+                FirebaseFirestoreException.Code.UNAUTHENTICATED ->
+                    "Tu sesión expiró. Volvé a iniciar sesión para sincronizar."
+                else ->
+                    "Error de Firestore (${e.code.name}). Datos conservados en el dispositivo."
+            }
+            is FirebaseNetworkException, is IOException ->
+                "Sin conexión a internet. Modo offline activo: se sincronizará al recuperar la red."
+            else ->
+                "No se pudo sincronizar (${e.localizedMessage ?: "error desconocido"}). Datos locales a salvo."
         }
         return ResultadoSync.ErrorControlado(mensaje)
     }

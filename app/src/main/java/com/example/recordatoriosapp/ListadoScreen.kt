@@ -17,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,7 +34,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 @Composable
 fun ListadoScreen(
     viewModel: ListadoViewModel,
-    onRecordatorioClick: (Int) -> Unit,
+    emailUsuario: String,
+    resultadoPruebaSeguridad: String?,
+    onProbarSeguridad: () -> Unit,
+    onLimpiarPruebaSeguridad: () -> Unit,
+    onCerrarSesion: () -> Unit,
+    onRecordatorioClick: (String) -> Unit,
     onCrearRecordatorio: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -46,12 +52,14 @@ fun ListadoScreen(
             TopAppBar(
                 title = { Text("Mis Recordatorios") },
                 actions = {
-                    // Botón de sincronización manual controlada
                     TextButton(
                         onClick = { viewModel.sincronizar(descargarRemotos = true) },
                         enabled = !sincronizando
                     ) {
-                        Text(if (sincronizando) "Sincronizando..." else "Sincronizar")
+                        Text(if (sincronizando) "Sync..." else "Sincronizar")
+                    }
+                    TextButton(onClick = onCerrarSesion) {
+                        Text("Salir")
                     }
                 }
             )
@@ -67,7 +75,55 @@ fun ListadoScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Barra de preferencias persistentes (DataStore - Consigna 1)
+            // Información de sesión activa + botón de verificación de reglas de Firestore (Consigna 3)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Sesión: $emailUsuario",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedButton(onClick = onProbarSeguridad) {
+                    Text("Probar reglas", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            // Resultado de la prueba de seguridad contra uid ajeno (Consigna 3)
+            resultadoPruebaSeguridad?.let { resultado ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = resultado,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = onLimpiarPruebaSeguridad) {
+                            Text("OK")
+                        }
+                    }
+                }
+            }
+
+            // Barra de preferencias persistentes (DataStore)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -105,7 +161,7 @@ fun ListadoScreen(
                 }
             }
 
-            // Aviso controlado ante error de red / modo offline (Consigna 4)
+            // Aviso controlado ante error de red / modo offline
             mensajeSync?.let { aviso ->
                 Card(
                     modifier = Modifier
@@ -161,7 +217,6 @@ fun ListadoScreen(
                                 recordatorio = recordatorio,
                                 onClick = { onRecordatorioClick(recordatorio.id) }
                             )
-                            // Indicador visual del estado de sincronización (Consigna 3)
                             AssistChip(
                                 onClick = { onRecordatorioClick(recordatorio.id) },
                                 label = {

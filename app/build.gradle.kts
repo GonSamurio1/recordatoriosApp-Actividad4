@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     id("com.google.devtools.ksp")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -14,28 +15,51 @@ android {
         applicationId = "com.example.recordatoriosapp"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
 
+    flavorDimensions += "entorno"
+    productFlavors {
+        create("dev") {
+            dimension = "entorno"
+            versionNameSuffix = "-dev"
+            resValue("string", "app_name", "Recordatorios (DEV)")
+            buildConfigField("String", "ENTORNO_NOMBRE", "\"DESARROLLO\"")
+            buildConfigField("Boolean", "HABILITAR_LOGS_DEBUG", "true")
+        }
+        create("prod") {
+            dimension = "entorno"
+            resValue("string", "app_name", "Recordatorios")
+            buildConfigField("String", "ENTORNO_NOMBRE", "\"PRODUCCION\"")
+            buildConfigField("Boolean", "HABILITAR_LOGS_DEBUG", "false")
+        }
     }
 
     buildTypes {
+        debug {
+            isMinifyEnabled = false
+        }
         release {
-            optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
-            }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
     buildFeatures {
         compose = true
         buildConfig = true
+        resValues = true
     }
 }
 
@@ -74,4 +98,9 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-auth-ktx")
+    implementation("com.google.firebase:firebase-firestore-ktx")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 }

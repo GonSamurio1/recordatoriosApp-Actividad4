@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 
-// Contenedor único de dependencias de la aplicación (Singleton)
 class AppContainer(context: Context) {
 
     private val appContext = context.applicationContext
@@ -19,25 +18,32 @@ class AppContainer(context: Context) {
         AppDatabase.getInstance(appContext)
     }
 
-    // 3. Servicio remoto (Retrofit)
-    private val apiService: RecordatorioApiService by lazy {
-        RetrofitClient.getApiService(appContext)
+    // 3. Fuentes Cloud (Firebase Authentication + Cloud Firestore)
+    val authDataSource: FirebaseAuthDataSource by lazy {
+        FirebaseAuthDataSource()
     }
 
-    // 4. Repositorio Local-First
+    private val firestoreDataSource: FirestoreDataSource by lazy {
+        FirestoreDataSource()
+    }
+
+    // 4. Repositorio Local-First conectado a Cloud
     val recordatorioRepository: RecordatorioRepository by lazy {
         RecordatorioRepository(
             dao = database.recordatorioDao(),
-            api = apiService
+            firestoreDataSource = firestoreDataSource,
+            authDataSource = authDataSource
         )
     }
 }
 
-// Factory para instanciar los ViewModels con el repositorio real
 class AppViewModelFactory(private val container: AppContainer) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         return when {
+            modelClass.isAssignableFrom(AuthViewModel::class.java) -> {
+                AuthViewModel(container.authDataSource, container.recordatorioRepository) as T
+            }
             modelClass.isAssignableFrom(ListadoViewModel::class.java) -> {
                 ListadoViewModel(container.recordatorioRepository, container.preferenciasRepository) as T
             }
